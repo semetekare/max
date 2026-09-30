@@ -1,0 +1,646 @@
+# OpenAPI 3.1 спецификация HTTP API решения «Поговорим».
+# Источник: docs/api.md, src/server.ts, src/admin.ts.
+openapi: 3.1.0
+info:
+  title: Поговорим — Bot & Mini App API
+  version: 1.0.0
+  description: |
+    API мини-приложения (`/api/*`) и админки (`/admin/api/*`).
+
+    Мини-приложение: каждый запрос требует заголовок `X-Init-Data` со строкой
+    данных запуска от MAX (HMAC-подпись бота, `auth_date` не старше 24 часов).
+    Пользователь берётся из подписи, отдельно передавать его id не нужно.
+
+    Админка: заголовок `Authorization: Bearer <ADMIN_PASSWORD>`. Если
+    `ADMIN_PASSWORD` не задан, все пути `/admin/api/*` отвечают 404.
+
+    Все ответы — JSON, кроме раздачи статики. Ошибка: `{ "error": "текст" }`.
+servers:
+  - url: https://82.146.54.2
+tags:
+  - name: public
+    description: Публичная статика без аутентификации
+  - name: miniapp
+    description: API мини-приложения, заголовок X-Init-Data
+  - name: admin
+    description: API админки, Bearer-пароль
+security:
+  - initData: []
+paths:
+  /:
+    get:
+      tags: [public]
+      summary: Главная страница мини-приложения (статика)
+      description: >
+        Всё, что не `/api`, отдаётся из `public/`. HTML — с `no-cache`,
+        файлы из `public/assets/` — с вечным кешем.
+      security: []
+      responses:
+        "200":
+          description: HTML или статический файл
+          content:
+            text/html:
+              schema: { type: string }
+        "404":
+          description: Файл не найден
+        "405":
+          description: Метод не GET/HEAD
+
+  /api/me:
+    get:
+      tags: [miniapp]
+      summary: Текущий пользователь, startParam и username бота
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user, bot]
+                properties:
+                  user:
+                    type: object
+                    required: [id, name]
+                    properties:
+                      id: { type: number }
+                      name: { type: string }
+                  startParam:
+                    type: [string, "null"]
+                  bot: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/decks:
+    get:
+      tags: [miniapp]
+      summary: Каталог колод без архивных
+      parameters:
+        - { name: theme, in: query, schema: { type: string }, description: "couple | friends | family | team" }
+        - { name: mood, in: query, schema: { type: string }, description: "light | deep | fun" }
+        - { name: lang, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Каталог
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [filters, decks]
+                properties:
+                  filters: { type: object }
+                  decks:
+                    type: array
+                    items: { $ref: "#/components/schemas/DeckSummary" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/cards/current:
+    get:
+      tags: [miniapp]
+      summary: Незавершённая партия пользователя или null
+      responses:
+        "200":
+          description: Текущая партия
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [session]
+                properties:
+                  session:
+                    oneOf:
+                      - { $ref: "#/components/schemas/CardsSession" }
+                      - { type: "null" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/cards/sessions:
+    post:
+      tags: [miniapp]
+      summary: Начать партию в карточки
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deckId]
+              properties:
+                deckId: { type: string, description: Идентификатор колоды, например couple-deep }
+                penalty: { type: boolean, description: Включить штрафные задания }
+                launch: { type: string, description: "Токен из start_param вида c_<token>" }
+      responses:
+        "200":
+          description: Сессия создана (статус active)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CardsSession" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/cards/sessions/{sessionId}:
+    parameters:
+      - { name: sessionId, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [miniapp]
+      summary: Состояние партии
+      responses:
+        "200":
+          description: Состояние партии
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CardsSession" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/cards/sessions/{sessionId}/resume:
+    parameters:
+      - { name: sessionId, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [miniapp]
+      summary: Продолжить партию после паузы
+      responses:
+        "200":
+          description: Состояние партии
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CardsSession" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/cards/sessions/{sessionId}/discussed:
+    parameters:
+      - { name: sessionId, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [miniapp]
+      summary: Отметить текущую карточку обсуждённой
+      responses:
+        "200":
+          description: Следующая карточка или итог
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CardsSession" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/cards/sessions/{sessionId}/exit:
+    parameters:
+      - { name: sessionId, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [miniapp]
+      summary: Выйти и сохранить прогресс
+      description: >
+        Завершает/приостанавливает партию (DELETE для сессий в API нет):
+        статус становится paused, прогресс сохраняется и партия продолжается.
+      responses:
+        "200":
+          description: Состояние партии
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CardsSession" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/tests:
+    get:
+      tags: [miniapp]
+      summary: Список тестов
+      responses:
+        "200":
+          description: Список тестов
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tests]
+                properties:
+                  tests:
+                    type: array
+                    items: { $ref: "#/components/schemas/TestSummary" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/tests/sessions:
+    post:
+      tags: [miniapp]
+      summary: Создать сессию теста
+      description: Для парного теста бот отправляет приглашение партнёру.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [testId]
+              properties:
+                testId: { type: string, description: Идентификатор теста, например style }
+                solo: { type: boolean, description: Пройти тест одному }
+                launch: { type: string, description: "Токен из start_param вида c_<token>" }
+      responses:
+        "200":
+          description: Сессия создана
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QuizSession" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/tests/sessions/{quizId}:
+    parameters:
+      - { name: quizId, in: path, required: true, schema: { type: string } }
+    get:
+      tags: [miniapp]
+      summary: Состояние сессии теста
+      description: Мини-приложение опрашивает его во время теста.
+      responses:
+        "200":
+          description: Состояние сессии
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QuizSession" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/tests/sessions/{quizId}/join:
+    parameters:
+      - { name: quizId, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [miniapp]
+      summary: Присоединиться вторым игроком
+      responses:
+        "200":
+          description: Состояние сессии
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QuizSession" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/tests/sessions/{quizId}/answer:
+    parameters:
+      - { name: quizId, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [miniapp]
+      summary: Ответ на текущий вопрос
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [option]
+              properties:
+                option: { type: number, description: Номер варианта с нуля }
+      responses:
+        "200":
+          description: Состояние сессии
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QuizSession" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/tests/sessions/{quizId}/away:
+    parameters:
+      - { name: quizId, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [miniapp]
+      summary: Игрок свернул приложение, тест на паузе
+      responses:
+        "200":
+          description: Состояние сессии
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QuizSession" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/tests/sessions/{quizId}/back:
+    parameters:
+      - { name: quizId, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [miniapp]
+      summary: Игрок вернулся
+      responses:
+        "200":
+          description: Состояние сессии
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QuizSession" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/tests/sessions/{quizId}/leave:
+    parameters:
+      - { name: quizId, in: path, required: true, schema: { type: string } }
+    post:
+      tags: [miniapp]
+      summary: Выйти из теста
+      description: >
+        Сессия завершается с частичным результатом (статус interrupted).
+        Удаление сессий через API не предусмотрено — это финальное действие.
+      responses:
+        "200":
+          description: Состояние сессии
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/QuizSession" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/api/check:
+    get:
+      tags: [admin]
+      summary: Проверка пароля
+      security: [{ adminAuth: [] }]
+      responses:
+        "200":
+          description: Пароль верный
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok: { type: boolean, const: true }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /admin/api/stats:
+    get:
+      tags: [admin]
+      summary: Сводка по пользователям, партиям и тестам
+      security: [{ adminAuth: [] }]
+      responses:
+        "200":
+          description: Статистика
+          content:
+            application/json:
+              schema: { type: object }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /admin/api/users:
+    get:
+      tags: [admin]
+      summary: Пользователи с числом игр
+      security: [{ adminAuth: [] }]
+      responses:
+        "200": { description: OK }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /admin/api/users/{userId}:
+    parameters:
+      - { name: userId, in: path, required: true, schema: { type: number } }
+    get:
+      tags: [admin]
+      summary: Пользователь, его партии, тесты и напоминания
+      security: [{ adminAuth: [] }]
+      responses:
+        "200": { description: OK }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/api/decks:
+    get:
+      tags: [admin]
+      summary: Все колоды, включая архивные
+      security: [{ adminAuth: [] }]
+      responses:
+        "200": { description: OK }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [admin]
+      summary: Создать колоду
+      security: [{ adminAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeckInput" }
+      responses:
+        "200": { description: Колода создана }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /admin/api/decks/{deckId}:
+    parameters:
+      - { name: deckId, in: path, required: true, schema: { type: string } }
+    put:
+      tags: [admin]
+      summary: Изменить колоду, в том числе убрать в архив
+      security: [{ adminAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeckInput" }
+      responses:
+        "200": { description: Колода изменена }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/api/sessions:
+    get:
+      tags: [admin]
+      summary: Последние партии и тесты
+      security: [{ adminAuth: [] }]
+      parameters:
+        - { name: limit, in: query, schema: { type: number, default: 100, maximum: 500 } }
+      responses:
+        "200": { description: OK }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /admin/api/tests:
+    get:
+      tags: [admin]
+      summary: Тесты (только чтение)
+      security: [{ adminAuth: [] }]
+      responses:
+        "200": { description: OK }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /admin/api/reminders:
+    get:
+      tags: [admin]
+      summary: Напоминания
+      security: [{ adminAuth: [] }]
+      responses:
+        "200": { description: OK }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /admin/api/reminders/{key}:
+    parameters:
+      - { name: key, in: path, required: true, schema: { type: string } }
+    delete:
+      tags: [admin]
+      summary: Удалить напоминание
+      security: [{ adminAuth: [] }]
+      responses:
+        "200": { description: Напоминание удалено }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/api/broadcast:
+    post:
+      tags: [admin]
+      summary: Рассылка всем, кто писал боту в личку
+      security: [{ adminAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: { type: string, maxLength: 4000 }
+      responses:
+        "200": { description: Рассылка отправлена }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+components:
+  securitySchemes:
+    initData:
+      type: apiKey
+      in: header
+      name: X-Init-Data
+      description: Строка данных запуска от MAX, подписанная токеном бота.
+    adminAuth:
+      type: http
+      scheme: bearer
+      description: Пароль админки из переменной окружения ADMIN_PASSWORD.
+  responses:
+    Unauthorized:
+      description: Нет заголовка аутентификации или он недействителен
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Пользователь не имеет доступа к объекту
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Объект не найден
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: Действие конфликтует с текущим состоянием
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BadRequest:
+      description: Некорректный запрос
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    DeckSummary:
+      type: object
+      required: [id, title, theme, mood, size]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        description: { type: string }
+        theme: { type: string, enum: [couple, friends, family, team] }
+        mood: { type: string, enum: [light, deep, fun] }
+        lang: { type: string }
+        size: { type: number }
+        penalties: { type: number }
+    TestSummary:
+      type: object
+      required: [id, title, size]
+      properties:
+        id: { type: string }
+        title: { type: string }
+        description: { type: string }
+        joint: { type: boolean }
+        size: { type: number }
+    CardsSession:
+      type: object
+      required: [id, deck, status, total, discussed]
+      properties:
+        id: { type: string }
+        deck:
+          type: object
+          required: [id, title]
+          properties:
+            id: { type: string }
+            title: { type: string }
+        penalty: { type: boolean }
+        status: { type: string, enum: [active, paused, finished] }
+        total: { type: number }
+        discussed: { type: number }
+        current:
+          oneOf:
+            - type: object
+              properties:
+                index: { type: number }
+                text: { type: string }
+            - { type: "null" }
+        result:
+          oneOf:
+            - type: object
+            - { type: "null" }
+    QuizSession:
+      type: object
+      required: [id, test, status, round, total, players]
+      properties:
+        id: { type: string }
+        test:
+          type: object
+          required: [id, title]
+          properties:
+            id: { type: string }
+            title: { type: string }
+        solo: { type: boolean }
+        status: { type: string, enum: [waiting, playing, finished, expired, interrupted, timeout] }
+        round: { type: number }
+        total: { type: number }
+        isPlayer: { type: boolean }
+        question:
+          oneOf:
+            - type: object
+              properties:
+                text: { type: string }
+                options: { type: array, items: { type: string } }
+            - { type: "null" }
+        players:
+          type: array
+          items:
+            type: object
+            required: [name, state]
+            properties:
+              name: { type: string }
+              me: { type: boolean }
+              state: { type: string }
+              answered: { type: boolean }
+        result:
+          oneOf:
+            - type: object
+            - { type: "null" }
+    DeckInput:
+      type: object
+      required: [title, theme, mood, cards]
+      properties:
+        title: { type: string, maxLength: 100 }
+        description: { type: string, maxLength: 300 }
+        theme: { type: string, enum: [couple, friends, family, team] }
+        mood: { type: string, enum: [light, deep, fun] }
+        lang: { type: string }
+        cards: { type: array, items: { type: string } }
+        penalties: { type: array, items: { type: string } }
+        archived: { type: boolean }

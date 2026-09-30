@@ -1,0 +1,208 @@
+# DATA-API 1.0 — обязательные HTTP-проверки решения «Поговорим».
+# Не размещайте в этом файле пароли, токены, API-ключи и другие секреты:
+# значения ${initData} и ${adminPassword} платформа технической проверки
+# подставляет из защищённого канала проекта оценки решений.
+
+schemaVersion: "1.0"
+
+solution:
+  name: "Поговорим"
+  teamId: "t551"
+
+api:
+  baseUrl: "https://82.146.54.2"
+  openapi: "./openapi.yaml"
+  defaultHeaders:
+    Accept: "application/json"
+
+checks:
+  - id: "health"
+    name: "Доступность приложения"
+    description: "Главная страница мини-приложения отдаётся без аутентификации."
+    method: "GET"
+    path: "/"
+    role: "public"
+    expected:
+      statusCodes: [200]
+      contentType: "text/html"
+    timeoutMs: 5000
+    repeatable: true
+
+  - id: "list-decks"
+    name: "Каталог колод"
+    description: "Список карточных колод для беседы, доступный авторизованному пользователю."
+    method: "GET"
+    path: "/api/decks"
+    role: "user"
+    request:
+      headers:
+        X-Init-Data: "${initData}"
+    expected:
+      statusCodes: [200]
+      contentType: "application/json"
+      requiredFields:
+        - "filters"
+        - "decks"
+    timeoutMs: 5000
+    repeatable: true
+
+  - id: "start-cards"
+    name: "Начало партии в карточки"
+    description: "Создаёт тестовую сессию игры «Карточки» на встроенной колоде."
+    method: "POST"
+    path: "/api/cards/sessions"
+    role: "user"
+    request:
+      headers:
+        Content-Type: "application/json"
+        X-Init-Data: "${initData}"
+      body:
+        deckId: "couple-deep"
+        penalty: false
+    expected:
+      statusCodes: [200]
+      contentType: "application/json"
+      requiredFields:
+        - "id"
+        - "status"
+    timeoutMs: 5000
+    repeatable: false
+    extract:
+      sessionId: "$.id"
+
+  - id: "read-cards"
+    name: "Чтение состояния партии"
+    description: "Читает созданную сессию игры «Карточки» по её идентификатору."
+    method: "GET"
+    path: "/api/cards/sessions/{sessionId}"
+    role: "user"
+    dependsOn:
+      - "start-cards"
+    request:
+      headers:
+        X-Init-Data: "${initData}"
+      path:
+        sessionId: "${sessionId}"
+    expected:
+      statusCodes: [200]
+      contentType: "application/json"
+      requiredFields:
+        - "id"
+        - "status"
+        - "total"
+        - "discussed"
+    timeoutMs: 5000
+    repeatable: true
+
+  - id: "list-tests"
+    name: "Список тестов"
+    description: "Список тестов на совместимость, доступный авторизованному пользователю."
+    method: "GET"
+    path: "/api/tests"
+    role: "user"
+    request:
+      headers:
+        X-Init-Data: "${initData}"
+    expected:
+      statusCodes: [200]
+      contentType: "application/json"
+      requiredFields:
+        - "tests"
+    timeoutMs: 5000
+    repeatable: true
+
+  - id: "start-quiz"
+    name: "Создание сессии теста"
+    description: "Создаёт одиночную сессию встроенного теста на совместимость."
+    method: "POST"
+    path: "/api/tests/sessions"
+    role: "user"
+    request:
+      headers:
+        Content-Type: "application/json"
+        X-Init-Data: "${initData}"
+      body:
+        testId: "style"
+        solo: true
+    expected:
+      statusCodes: [200]
+      contentType: "application/json"
+      requiredFields:
+        - "id"
+        - "status"
+    timeoutMs: 5000
+    repeatable: false
+    extract:
+      quizId: "$.id"
+
+  - id: "read-quiz"
+    name: "Чтение состояния теста"
+    description: "Читает созданную сессию теста по её идентификатору."
+    method: "GET"
+    path: "/api/tests/sessions/{quizId}"
+    role: "user"
+    dependsOn:
+      - "start-quiz"
+    request:
+      headers:
+        X-Init-Data: "${initData}"
+      path:
+        quizId: "${quizId}"
+    expected:
+      statusCodes: [200]
+      contentType: "application/json"
+      requiredFields:
+        - "id"
+        - "test"
+        - "status"
+        - "players"
+    timeoutMs: 5000
+    repeatable: true
+
+  - id: "admin-check"
+    name: "Доступ к админке"
+    description: "Проверка пароля администратора. Пароль передаётся платформой через защищённый канал."
+    method: "GET"
+    path: "/admin/api/check"
+    role: "admin"
+    request:
+      headers:
+        Authorization: "Bearer ${adminPassword}"
+    expected:
+      statusCodes: [200]
+      contentType: "application/json"
+      requiredFields:
+        - "ok"
+    timeoutMs: 5000
+    repeatable: true
+
+cleanup:
+  # Выход из сессии «Карточек» с сохранением прогресса: DELETE для сессий
+  # в API не предусмотрен, поэтому мягкое завершение вместо удаления.
+  - id: "exit-cards"
+    method: "POST"
+    path: "/api/cards/sessions/{sessionId}/exit"
+    role: "user"
+    request:
+      headers:
+        X-Init-Data: "${initData}"
+      path:
+        sessionId: "${sessionId}"
+    expected:
+      statusCodes: [200, 404]
+    timeoutMs: 5000
+
+  # Выход из сессии теста: она завершается с частичным результатом
+  # (статус interrupted) — это финальное состояние вместо удаления.
+  - id: "leave-quiz"
+    method: "POST"
+    path: "/api/tests/sessions/{quizId}/leave"
+    role: "user"
+    request:
+      headers:
+        X-Init-Data: "${initData}"
+      path:
+        quizId: "${quizId}"
+    expected:
+      statusCodes: [200, 404]
+    timeoutMs: 5000
